@@ -54,7 +54,7 @@ CORS(app)
 # mongo db setup
 mongo_client = MongoClient(MONGO_URI)
 db = mongo_client["Talent-Skills-Alliance"]
-collection = db["review"]
+collection = db["reviews"]
 
 
 if GEMINI_API_KEY:
@@ -170,7 +170,7 @@ def fetch_logs():
     if not os.path.exists("logs/server.log"):
         return jsonify({"error": "No logs found."}), 404
 
-    return send_file("logs/server.log", as_attachment=True, download_name="server.log")
+    return send_file("logs/server.log", as_attachment=True, download_name="server.txt")
 
 
 @app.errorhandler(405)
@@ -186,6 +186,11 @@ def internal_error(error):
 @app.errorhandler(404)
 def not_found(error):
     return jsonify({'error': "Invalid endpoint. Please check the URL and try again."}), 404
+
+@app.teardown_appcontext
+def close_mongo_connection(exception):
+    mongo_client.close()
+
 @app.route('/analyse', methods=['POST'])
 def analyse():
     try:
