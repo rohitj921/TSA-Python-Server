@@ -187,9 +187,9 @@ def internal_error(error):
 def not_found(error):
     return jsonify({'error': "Invalid endpoint. Please check the URL and try again."}), 404
 
-@app.teardown_appcontext
-def close_mongo_connection(exception):
-    mongo_client.close()
+#@app.teardown_appcontext
+#def close_mongo_connection(exception):
+    #mongo_client.close()
 
 @app.route('/analyse', methods=['POST'])
 def analyse():
