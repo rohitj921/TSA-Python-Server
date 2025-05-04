@@ -52,10 +52,14 @@ CORS(app)
 # CORS(app, resources={r"/*": {"origins": ["http://localhost:3000"]}})
 
 # mongo db setup
-mongo_client = MongoClient(MONGO_URI)
-db = mongo_client["Talent-Skills-Alliance"]
-collection = db["reviews"]
+# mongo_client = MongoClient(MONGO_URI)
+# db = mongo_client["Talent-Skills-Alliance"]
+# collection = db["reviews"]
 
+# setting though globals in process-reviews endpoint
+mongo_client = None
+db = None
+collection = None
 
 if GEMINI_API_KEY:
     client = genai.Client(api_key=GEMINI_API_KEY)
@@ -66,17 +70,43 @@ OUTCOMES = {0: "Irrelevant", 1: "Negative", 2: "Neutral", 3: "Positive"}
 LOCAL_RATING_MAP = {0: 5, 1: 2, 2: 5, 3: 8}
 
 
+def check_mongo_connection():
+
+    global mongo_client, db, collection
+
+    try:
+        mongo_client.admin.command('ping')
+        return True
+    except Exception as e:
+        logging.error(f"MongoDB connection lost: {e}")
+        try:
+            mongo_client = MongoClient(MONGO_URI)
+            db = mongo_client["Talent-Skills-Alliance"]
+            collection = db["reviews"]
+            logging.info("Reconnected to MongoDB")
+            return True
+        except Exception as re:
+            logging.critical(f"Failed to reconnect MongoDB: {re}")
+            return False
+
+
 # route for processing reviews
 @app.route("/process-reviews", methods=["GET"])
 def process_reviews():
-    try:
 
+    if not check_mongo_connection():
+        return jsonify({'error': 'Database connection failed'}), 500
+
+    try:
         if not model or not vectorizer:
             logging.error(
                 "Model or vectorizer not loaded. Cannot process reviews.")
             return jsonify({"error": "Model not loaded"}), 500
 
-        unprocessed = list(collection.find({"isProcessed": False}))
+        # unprocessed = list(collection.find({"isProcessed": False}))
+        unprocessed = list(collection.find({
+            "$or": [{"isProcessed": False}, {"isProcessed": {"$exists": False}}]
+        }))
 
         if not unprocessed:
             logging.info("No unprocessed reviews found")
@@ -85,6 +115,8 @@ def process_reviews():
         for review in unprocessed:
             text = review.get("review", "").strip()
             if not text:
+                logging.warning(
+                    f"Review ID {review['_id']} skipped due to missing or empty text")
                 continue
 
             # Local prediction
@@ -99,7 +131,7 @@ def process_reviews():
                 isProcessed = False
             else:
                 isProcessed = True
-                
+
             collection.update_one(
                 {"_id": review["_id"]},
                 {
@@ -119,7 +151,7 @@ def process_reviews():
         return jsonify({"error": "Failed to process reviews", "details": str(e)}), 500
 
 
-def gemini_sentiment_rating(comment,retries=3, delay=2):
+def gemini_sentiment_rating(comment, retries=3, delay=2):
     prompt = (
         "You are a sentiment analysis expert. "
         "Given the following review comment, classify it and assign a numeric rating from 1 to 10. "
@@ -187,9 +219,10 @@ def internal_error(error):
 def not_found(error):
     return jsonify({'error': "Invalid endpoint. Please check the URL and try again."}), 404
 
-@app.teardown_appcontext
-def close_mongo_connection(exception):
-    mongo_client.close()
+# @app.teardown_appcontext
+# def close_mongo_connection(exception):
+#     mongo_client.close()
+
 
 @app.route('/analyse', methods=['POST'])
 def analyse():
@@ -197,7 +230,7 @@ def analyse():
         if not request.is_json:
             logging.warning("Invalid request: Expected JSON")
             return jsonify({'error': 'Invalid request. Expected JSON'}), 400
-        
+
         data = request.get_json()
         if not data or not isinstance(data, dict):
             logging.warning("Empty or malformed JSON request received")
@@ -206,26 +239,27 @@ def analyse():
         if model is None or vectorizer is None:
             logging.critical("Model or vectorizer not loaded properly")
             return jsonify({'error': 'Model not loaded properly'}), 500
-        
+
         text = str(data.get('comment', '')).strip()
         if not text:
             logging.warning("Missing 'comment' field in request")
             return jsonify({'error': "Input 'comment' is required"}), 400
-        
+
         if text.isdigit():
             logging.warning("Comment cannot be just a number")
             return jsonify({'error': "Input 'comment' cannot be just a number"}), 400
-        
+
         logging.info(f"Processing comment: {text}")
         new_comment_vec = vectorizer.transform([text])
         prediction = model.predict(new_comment_vec)
-        
-        outcomes = {0: "Irrelevant", 1: "Negative", 2: "Neutral", 3: "Positive"}
+
+        outcomes = {0: "Irrelevant", 1: "Negative",
+                    2: "Neutral", 3: "Positive"}
         result = outcomes.get(prediction[0], "Unknown")
         logging.info(f"Prediction result: {result} ({int(prediction[0])})")
-        
+
         return jsonify({'Result': result, "Sentiment": int(prediction[0])}), 200
-    
+
     except Exception as e:
         logging.error(f"Error processing request: {e}")
         return jsonify({'error': 'Internal server error', 'details': str(e)}), 500
