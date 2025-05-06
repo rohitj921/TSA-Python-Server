@@ -107,10 +107,12 @@ def process_reviews():
         unprocessed = list(collection.find({
             "$or": [{"isProcessed": False}, {"isProcessed": {"$exists": False}}]
         }))
-
+        print("unprocessed reviews:", len(unprocessed))
         if not unprocessed:
             logging.info("No unprocessed reviews found")
             return jsonify({"message": "No unprocessed reviews found"}), 200
+
+        affected_review_for_ids = set()
 
         for review in unprocessed:
             text = review.get("review", "").strip()
@@ -144,7 +146,47 @@ def process_reviews():
             logging.info(
                 f"Updated Review ID {review['_id']} → Comment: {text}, Rating: {rating}, Local: {local_sentiment}, Gemini: {gemini_sentiment}")
 
-        return jsonify({"message": f"Processed {len(unprocessed)} reviews."}), 200
+            review_for_id = review.get("reviewFor")
+            if review_for_id:
+                affected_review_for_ids.add(review_for_id)
+
+        print("Affected reviewFor IDs:", affected_review_for_ids)
+        # performing summarization for affected reviewFor IDs
+        for review_for_id in affected_review_for_ids:
+            try:
+                all_reviews = list(collection.find({
+                    "reviewFor": review_for_id,
+                    "review": {"$ne": None}
+                }))
+                combined_text = "\n".join(
+                    [r["review"] for r in all_reviews if r.get("review")])
+                if not combined_text.strip():
+                    logging.info(
+                        f"Skipping summary for {review_for_id}: No valid comments")
+                    continue
+
+                summary_prompt = (
+                    "You are a review summarizer AI. Summarize the overall opinion about the person below "
+                    "in 1-2 concise sentences, no more than 200 characters in total. Focus on the tone and recurring themes. "
+                    "Avoid repetition, lists, or generic phrases.\n\n"
+                    f"Reviews:\n{combined_text}"
+                )
+
+                response = client.models.generate_content(
+                    model="gemini-2.0-flash", contents=summary_prompt)
+                summary_text = response.text.strip()
+                print("combined text:\n", combined_text)
+                print("Summary:\n", summary_text)
+                collection.update_many(
+                    {"reviewFor": review_for_id},
+                    {"$set": {"extraRemarks": summary_text}}
+                )
+                logging.info(f"Updated summary for reviewFor: {review_for_id}")
+
+            except Exception as e:
+                logging.error(f"Summarization failed for {review_for_id}: {e}")
+
+        return jsonify({"message": f"Processed {len(unprocessed)} reviews and summarized {len(affected_review_for_ids)} users."}), 200
 
     except Exception as e:
         logging.error(f"Error processing reviews: {e}")
@@ -190,6 +232,65 @@ def gemini_sentiment_rating(comment, retries=3, delay=2):
 
 # sentiment, rating = get_gemini_sentiment_rating("terribly good")
 # print(sentiment, rating)
+@app.route("/summary", methods=["GET"])
+def summarize_user_reviews():
+    if not check_mongo_connection():
+        logging.error("Cannot summarize: MongoDB connection failed")
+        return jsonify({"error": "MongoDB connection failed"}), 500
+
+    try:
+        review_groups = collection.aggregate([
+            {"$match": {"reviewFor": {"$exists": True}, "review": {"$ne": None}}},
+            {"$group": {
+                "_id": "$reviewFor",
+                "comments": {"$push": "$review"}
+            }}
+        ])
+        # print(len(list(review_groups)), "groups found")
+        updated_count = 0
+        for group in list(review_groups):
+            review_for_id = group["_id"]
+            comments = group["comments"]
+
+            if len(comments) < 1:
+                logging.info(f"Skipping {review_for_id}: Not enough comments")
+                continue
+            # print("inloop")
+            combined_text = "\n".join(comments)
+            # prompt = (
+            #     "You are a review summarizer. Summarize the overall opinion about this person "
+            #     "based on multiple reviews below in 2-3 sentences. Avoid repetition or listing comments. "
+            #     f"\n\nReviews:\n{combined_text}"
+            # )
+            prompt = (
+                "You are a review summarizer AI. Summarize the overall opinion about the person below "
+                "in 1-2 concise sentences, no more than 200 characters in total. Focus on the tone and recurring themes. "
+                "Avoid repetition, lists, or generic phrases.\n\n"
+                f"Reviews:\n{combined_text}"
+            )
+            # print(prompt)
+            try:
+                # response = client.models.generate_content(
+                #     model="gemini-2.0", contents=prompt)
+                response = client.models.generate_content(
+                    model="gemini-2.0-flash", contents=prompt)
+                summary_text = response.text.strip()
+                print(summary_text)
+                collection.update_many(
+                    {"reviewFor": review_for_id},
+                    {"$set": {"extraRemarks": summary_text}}
+                )
+                updated_count += 1
+                logging.info(
+                    f"Updated extraRemarks for reviewFor: {review_for_id}")
+            except Exception as e:
+                logging.error(
+                    f"Gemini error while summarizing for {review_for_id}: {e}")
+        return jsonify({"message": f"Summarization complete. Updated {updated_count} users."}), 200
+
+    except Exception as e:
+        logging.error(f"Failed to summarize user reviews: {e}")
+        return jsonify({"error": "Internal Server Error"}), 500
 
 
 @app.route('/', methods=['GET'])
